@@ -23,8 +23,8 @@ static float MS_PER_FRAME = 1000.0f / 60.0f;
 
 #define TILE_WIDTH       8
 #define TILE_HEIGHT	     8
-#define TILE_MAP_WIDTH   32
-#define TILE_MAP_HEIGHT  32
+#define TILE_MAP_WIDTH   5
+#define TILE_MAP_HEIGHT  4
 
 uint8_t inputflags = 0;
 
@@ -34,25 +34,45 @@ void* BitmapMemory;
 int BitmapWidth;
 int BitmapHeight;
 
+typedef uint8_t Tile[8][8];
+
+Tile Tiles[3] =  {  2,0,3,2,2,0,3,2,
+					2,0,2,2,2,0,2,2,
+					0,0,0,0,0,0,0,0,
+					3,2,2,0,3,2,2,0,
+					2,2,2,0,2,2,2,0,
+					0,0,0,0,0,0,0,0,
+					2,0,3,2,2,0,3,2,
+					2,0,2,2,2,0,2,2,
+
+				    0,0,0,0,0,0,0,0,
+					0,2,2,2,2,2,2,0,
+					0,2,3,3,3,3,2,0,
+					0,2,3,2,2,0,2,0,
+					0,2,3,2,2,0,2,0,
+					0,2,0,0,0,0,2,0,
+					0,2,2,2,2,2,2,0,
+					0,0,0,0,0,0,0,0,
+
+				    0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1  };
+
+uint8_t TileMap[TILE_MAP_HEIGHT][TILE_MAP_WIDTH] =   {  0,1,1,1,0,
+														0,2,2,2,0,
+														0,2,2,2,0,
+														0,1,1,1,0  };
+
+#define numColours 4
+
+RGBQUAD Palette[4];
+
 byte* ROM;
-
-uint8_t TileA[8][8] = { {1,0,3,1,1,0,3,1},
-						{1,0,1,1,1,0,1,1},
-						{0,0,0,0,0,0,0,0},
-						{3,1,1,0,3,1,1,3},
-						{1,1,1,0,1,1,1,3},
-						{0,0,0,0,0,0,0,0},
-						{1,0,3,1,1,0,3,1},
-						{1,0,1,1,1,0,1,1} };
-
-uint8_t TileB[8][8] = { {0,0,0,0,0,0,0,0},
-						{0,1,1,1,1,1,1,1},
-						{0,1,3,3,3,3,1,0},
-						{0,1,3,1,1,0,1,0},
-						{0,1,3,1,1,0,1,0},
-						{0,1,0,0,0,0,1,0},
-						{0,1,1,1,1,1,1,0},
-						{0,0,0,0,0,0,0,0} };
 
 void GBResizeDIB(int Width, int Height)
 {
@@ -61,14 +81,14 @@ void GBResizeDIB(int Width, int Height)
 		VirtualFree(BitmapMemory, 0, MEM_RELEASE);
 	}
 
-	BitmapWidth = TILE_WIDTH * TILE_MAP_WIDTH;
-	BitmapHeight = TILE_HEIGHT * TILE_MAP_HEIGHT;
+	BitmapWidth = TILE_WIDTH;
+	BitmapHeight = TILE_HEIGHT;
 
 	BitmapInfo.bmiHeader =
 	{
 		sizeof(BitmapInfo.bmiHeader),
 		BitmapWidth,
-		BitmapHeight,
+		-BitmapHeight,
 		1,
 		32,
 		BI_RGB,
@@ -79,6 +99,13 @@ void GBResizeDIB(int Width, int Height)
 		0
 	};
 
+	for (int i = 0; i < numColours; i++)
+	{
+		uint8_t col = (UINT8_MAX / (numColours - 1) * i);
+		RGBQUAD rgb = { col,col,col,0 };
+		Palette[i] = rgb;
+	}
+
 	int BytesPerPixel = 4;
 	int BitmapMemorySize = (BitmapWidth * BitmapHeight) * BytesPerPixel;
 	BitmapMemory = VirtualAlloc(0, BitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
@@ -88,22 +115,16 @@ void GBResizeDIB(int Width, int Height)
 		uint8_t* Row = (uint8_t*)BitmapMemory;
 		for (int Y = 0; Y < BitmapHeight; Y++)
 		{
-			uint8_t* Pixel = (uint8_t*)Row;
+			RGBQUAD* Pixel = (RGBQUAD*)Row;
 			for (int X = 0; X < BitmapWidth; X++)
 			{
-				int Shades = 4;
-				int col = (X % Shades) * (255 / (Shades - 1));  // iterate through four shades of grey
 				// BGRx
-				*Pixel = col;
-				Pixel++;
+				auto tile = Tiles[0];
+				uint8_t i = tile[Y][X];
+				RGBQUAD col = Palette[i];
 
-				*Pixel = col;
-				Pixel++;
+				memcpy(Pixel, &col, sizeof RGBQUAD);
 
-				*Pixel = col;
-				Pixel++;
-
-				*Pixel = 0;
 				Pixel++;
 			}
 
@@ -331,7 +352,7 @@ void CleanUp()
 	{
 		VirtualFree(ROM, 0, MEM_RELEASE);
 	}
-	// probably move other cleanu to here as well
+	// probably move other cleanup to here as well
 }
 
 
