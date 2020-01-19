@@ -2,6 +2,7 @@
 #include <cinttypes>
 #include <stdio.h>
 #include <malloc.h>
+#include <assert.h>
 
 static int SCREEN_WIDTH = 160;
 static int SCREEN_HEIGHT = 144;
@@ -11,6 +12,7 @@ static float MS_PER_FRAME = 1000.0f / 60.0f;
 #define SET(x,b)    x|=b
 #define RESET(x,b)  x&=~(b)
 #define TOGGLE(x,b) x^=b
+#define TEST(x,b)	x&b
 
 #define FLAG_JOY_RIGHT   1 << 0 // 0000 0001 
 #define FLAG_JOY_LEFT    1 << 1 // 0000 0010
@@ -23,10 +25,10 @@ static float MS_PER_FRAME = 1000.0f / 60.0f;
 
 #define TILE_WIDTH       8
 #define TILE_HEIGHT	     8
-#define TILE_MAP_WIDTH   5
-#define TILE_MAP_HEIGHT  4
+#define TILE_MAP_WIDTH   10
+#define TILE_MAP_HEIGHT  8
 
-uint8_t inputflags = 0;
+uint8_t InputFlags = 0;
 
 HWND windowHandle;
 BITMAPINFO BitmapInfo;
@@ -63,16 +65,62 @@ Tile Tiles[3] =  {  2,0,3,2,2,0,3,2,
 					0,0,0,2,2,2,3,1,
 					0,0,0,2,2,2,3,1  };
 
-uint8_t TileMap[TILE_MAP_HEIGHT][TILE_MAP_WIDTH] =   {  0,1,1,1,0,
-														0,2,2,2,0,
-														0,2,2,2,0,
-														0,1,1,1,0  };
+uint8_t TileMap[TILE_MAP_HEIGHT][TILE_MAP_WIDTH] =   {  1, 2, 1, 1, 0, 0, 1, 1, 2, 1,
+														0, 2, 2, 2, 0, 0, 2, 2, 2, 0,
+														0, 2, 0, 2, 0, 0, 2, 0, 2, 0,
+														0, 1, 1, 1, 0, 0, 1, 1, 1, 0,
+														1, 2, 1, 1, 0, 0, 1, 1, 2, 1,
+														0, 2, 2, 2, 0, 0, 2, 2, 2, 0,
+														0, 2, 0, 2, 0, 0, 2, 0, 2, 0,
+														0, 1, 1, 1, 0, 0, 1, 1, 1, 0  };
 
-#define numColours 4
+#define NUM_COLOURS 4
+
+#define CYCLES_PER_FRAME 69905
 
 RGBQUAD Palette[4];
 
-byte* ROM;
+byte* RAM;
+
+#define FLAG_ZERO		1 << 0 // 0000 0001 
+#define FLAG_ADD_SUB	1 << 1 // 0000 0010
+#define FLAG_HALF_CARRY 1 << 2 // 0000 0100
+#define FLAG_CARRY		1 << 3 // 0000 1000
+
+static union {
+	struct {
+		uint8_t StatusFlags;
+		uint8_t A;
+	};
+	uint16_t AF;
+};
+
+static union {
+	struct {
+		uint8_t C;
+		uint8_t B;
+	};
+	uint16_t BC;
+};
+
+static union {
+	struct {
+		uint8_t E;
+		uint8_t D;
+	};
+	uint16_t DE;
+};
+
+static union {
+	struct {
+		uint8_t L;
+		uint8_t H;
+	};
+	uint16_t HL;
+};
+
+uint16_t* StackPointer;
+uint16_t ProgramCounter;
 
 void GBResizeDIB(int Width, int Height)
 {
@@ -81,8 +129,8 @@ void GBResizeDIB(int Width, int Height)
 		VirtualFree(BitmapMemory, 0, MEM_RELEASE);
 	}
 
-	BitmapWidth = TILE_WIDTH;
-	BitmapHeight = TILE_HEIGHT;
+	BitmapWidth = TILE_WIDTH * TILE_MAP_WIDTH;
+	BitmapHeight = TILE_HEIGHT * TILE_MAP_HEIGHT;
 
 	BitmapInfo.bmiHeader =
 	{
@@ -99,39 +147,49 @@ void GBResizeDIB(int Width, int Height)
 		0
 	};
 
-	for (int i = 0; i < numColours; i++)
+	for (int i = 0; i < NUM_COLOURS; i++)
 	{
-		uint8_t col = (UINT8_MAX / (numColours - 1) * i);
+		uint8_t col = (UINT8_MAX / (NUM_COLOURS - 1) * i);
 		RGBQUAD rgb = { col,col,col,0 };
 		Palette[i] = rgb;
 	}
 
-	int BytesPerPixel = 4;
-	int BitmapMemorySize = (BitmapWidth * BitmapHeight) * BytesPerPixel;
+	int BitmapMemorySize = (BitmapWidth * BitmapHeight) * sizeof(uint32_t);
 	BitmapMemory = VirtualAlloc(0, BitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
+
+	if (AllocConsole())
+	{
+		FILE* fi = 0;
+		freopen_s(&fi, "CONOUT$", "w", stdout);
+	}
+
 	if (BitmapMemory)
 	{
-		int Pitch = BitmapWidth * BytesPerPixel;
-		uint8_t* Row = (uint8_t*)BitmapMemory;
-		for (int Y = 0; Y < BitmapHeight; Y++)
+		RGBQUAD* Pixel = (RGBQUAD*)BitmapMemory;
+		for (int TileY = 0; TileY < TILE_MAP_HEIGHT; TileY++)
 		{
-			RGBQUAD* Pixel = (RGBQUAD*)Row;
-			for (int X = 0; X < BitmapWidth; X++)
+			for (int Y = 0; Y < TILE_HEIGHT; Y++)
+				// NOTE loop incrementing Y comes outside loop inc'ing TileX
+				// for contiguous pixels
 			{
-				// BGRx
-				auto tile = Tiles[0];
-				uint8_t i = tile[Y][X];
-				RGBQUAD col = Palette[i];
-
-				memcpy(Pixel, &col, sizeof RGBQUAD);
-
-				Pixel++;
+				for (int TileX = 0; TileX < TILE_MAP_WIDTH; TileX++)
+				{
+					int TileI = TileMap[TileY][TileX];
+					//loop to draw bitmap as before
+					auto tile = Tiles[TileI];
+					for (int X = 0; X < TILE_WIDTH; X++)
+					{
+						uint8_t ColI = tile[Y][X];
+						//printf("%d", ColI);
+						RGBQUAD ColBGR = Palette[ColI];
+						memcpy(Pixel, &ColBGR, sizeof(RGBQUAD));
+						Pixel++;
+					}
+				}
+				//printf("\n");
 			}
-
-			Row += Pitch;
-		}
+		}	
 	}
-	// log errors and stuff
 }
 
 void RenderFrame(HDC DeviceContext, RECT* WindowRect, int x, int y, int width, int height)
@@ -195,37 +253,37 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 			case (unsigned int)('W') :
 			{
 				// Process the W key.
-				SET(inputflags, FLAG_JOY_UP);
+				SET(InputFlags, FLAG_JOY_UP);
 				break;
 			}
 			case (unsigned int)('A') :
 			{
 				// Process the A key.
-				SET(inputflags, FLAG_JOY_LEFT);
+				SET(InputFlags, FLAG_JOY_LEFT);
 				break;
 			}
 			case (unsigned int)('S') :
 			{
 				// Process the S key.
-				SET(inputflags, FLAG_JOY_DOWN);
+				SET(InputFlags, FLAG_JOY_DOWN);
 				break;
 			}
 			case (unsigned int)('D') :
 			{
 				// Process the D key.
-				SET(inputflags, FLAG_JOY_RIGHT);
+				SET(InputFlags, FLAG_JOY_RIGHT);
 				break;
 			}
 			case VK_SPACE:
 			{
 				// Process the Spacebar.
-				SET(inputflags, FLAG_JOY_START);
+				SET(InputFlags, FLAG_JOY_START);
 				break;
 			}
 			case VK_SHIFT:
 			{
 				// Process the Shift key.
-				SET(inputflags, FLAG_JOY_SELECT);;
+				SET(InputFlags, FLAG_JOY_SELECT);;
 				break;
 			}
 			default:
@@ -238,37 +296,37 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 			case (unsigned int)('W') :
 			{
 				// Process the W key.
-				RESET(inputflags, FLAG_JOY_UP);
+				RESET(InputFlags, FLAG_JOY_UP);
 				break;
 			}
 			case (unsigned int)('A') :
 			{
 				// Process the A key.
-				RESET(inputflags, FLAG_JOY_LEFT);
+				RESET(InputFlags, FLAG_JOY_LEFT);
 				break;
 			}
 			case (unsigned int)('S') :
 			{
 				// Process the S key.
-				RESET(inputflags, FLAG_JOY_DOWN);
+				RESET(InputFlags, FLAG_JOY_DOWN);
 				break;
 			}
 			case (unsigned int)('D') :
 			{
 				// Process the D key.
-				RESET(inputflags, FLAG_JOY_RIGHT);
+				RESET(InputFlags, FLAG_JOY_RIGHT);
 				break;
 			}
 			case VK_SPACE:
 			{
 				// Process the Spacebar.
-				RESET(inputflags, FLAG_JOY_START);
+				RESET(InputFlags, FLAG_JOY_START);
 				break;
 			}
 			case VK_SHIFT:
 			{
 				// Process the Shift key.
-				RESET(inputflags, FLAG_JOY_SELECT);
+				RESET(InputFlags, FLAG_JOY_SELECT);
 				break;
 			}
 			default:
@@ -278,9 +336,103 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+uint16_t ReadU16()
+{
+	ProgramCounter++;
+	uint8_t lo = RAM[ProgramCounter];
+	ProgramCounter++;
+	uint8_t hi = RAM[ProgramCounter];
+	ProgramCounter++;
+
+	return hi << 8 | lo;
+}
+
+uint8_t ReadU8()
+{
+	ProgramCounter++;
+	uint8_t n = RAM[ProgramCounter];
+	ProgramCounter++;
+	return n;
+}
+
+void WriteU8(uint16_t addr, uint8_t n)
+{
+	RAM[addr] = n;
+	ProgramCounter++;
+}
+
 void update()
 {
+	uint32_t CycleCount = 0; 
+	uint8_t opcode;
 
+	while (CycleCount <= CYCLES_PER_FRAME)
+	{
+		// Fetch
+		opcode = RAM[ProgramCounter];
+
+		// Execute
+		switch (opcode)
+		{
+		case 0x00: // NOP
+		{
+			ProgramCounter++;
+			CycleCount += 4;
+			break;
+		}
+		case 0xc3: // JP a16
+		{
+			uint16_t nn = ReadU16();
+			ProgramCounter = nn;
+			CycleCount += 16;
+			break;
+		}
+		case 0xAF: // XOR A
+		{
+			A = A ^ A;
+			ProgramCounter++;
+			CycleCount += 4;
+			break;
+		}
+		case 0x21: // LD HL,d16
+		{
+			uint16_t nn = ReadU16();
+			HL = nn;
+			CycleCount += 12;
+			break;
+		}
+		case 0x0E: // LD C,d8
+		{
+			uint8_t n = ReadU8();
+			C = n;
+			CycleCount += 8;
+			break;
+		}
+		case 0x06: // LD B, d8
+		{
+			uint8_t n = ReadU8();
+			B = n;
+			CycleCount += 8;
+			break;
+		}
+		case 0x32: // LD (HL-),A
+		{
+			WriteU8(HL, A);
+			HL--;
+			CycleCount += 8;
+			break;
+		}
+		case 0x05: // DEC B
+		{
+			B--;
+			ProgramCounter++;
+			CycleCount += 4;
+			break;
+		}
+		default:
+			assert(false);
+		}
+	}
 }
 
 bool InitWindow(HINSTANCE _hInstance)
@@ -318,11 +470,21 @@ bool InitWindow(HINSTANCE _hInstance)
 	return true;
 }
 
+void Reset()
+{
+	AF = 0x01B0;
+	BC = 0x0013;
+	DE = 0x00D8;
+	HL = 0x014D;
+	StackPointer = (uint16_t*) &RAM[0xFFFE];
+	ProgramCounter = 0x100;
+}
+
 bool LoadROM()
 {
-	if (ROM)
+	if (RAM)
 	{
-		VirtualFree(ROM, 0, MEM_RELEASE);
+		VirtualFree(RAM, 0, MEM_RELEASE);
 	}
 
 	FILE* RomFile;
@@ -330,27 +492,30 @@ bool LoadROM()
 	fopen_s(&RomFile, "tetris.gb", "r");
 
 	if (RomFile == NULL) {
-		fprintf(stderr, "Can't open input file in.list!\n");
+		fprintf(stderr, "Can't open ROM file!\n");
 		return false;
 	}
 	fseek(RomFile, 0, SEEK_END);
 	Filesize = ftell(RomFile);
 	fseek(RomFile, 0, SEEK_SET);
 
-	ROM = (byte*)VirtualAlloc(0, Filesize, MEM_COMMIT, PAGE_READWRITE);
-	if (ROM)
+	RAM = (byte*)VirtualAlloc(0, UINT16_MAX, MEM_COMMIT, PAGE_READWRITE);
+	if (RAM)
 	{
-		fread((byte*)ROM, sizeof(byte), Filesize, RomFile);
+		fread((byte*)RAM, sizeof(byte), Filesize, RomFile);
 		fclose(RomFile);
 	}
+
+	Reset();
+
 	return true;
 }
 
 void CleanUp()
 {
-	if (ROM)
+	if (RAM)
 	{
-		VirtualFree(ROM, 0, MEM_RELEASE);
+		VirtualFree(RAM, 0, MEM_RELEASE);
 	}
 	// probably move other cleanup to here as well
 }
@@ -362,7 +527,6 @@ INT WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 	LARGE_INTEGER PerfCountFrequencyResult;
 	QueryPerformanceFrequency(&PerfCountFrequencyResult);
 	uint32_t PerfCountFrequency = PerfCountFrequencyResult.QuadPart;
-
 
 	if (InitWindow(hInstance))
 	{
@@ -397,7 +561,7 @@ INT WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			LARGE_INTEGER startCounter;
 			QueryPerformanceCounter(&startCounter);
 
-			update();
+			//update();
 			// tidy
 			RECT windowRect;
 			GetClientRect(windowHandle, &windowRect);
