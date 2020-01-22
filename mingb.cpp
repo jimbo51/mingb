@@ -38,7 +38,7 @@ int BitmapHeight;
 
 typedef uint8_t Tile[8][8];
 
-Tile Tiles[3] =  {  2,0,3,2,2,0,3,2,
+Tile Tiles[3] =  {	2,0,3,2,2,0,3,2,
 					2,0,2,2,2,0,2,2,
 					0,0,0,0,0,0,0,0,
 					3,2,2,0,3,2,2,0,
@@ -47,7 +47,7 @@ Tile Tiles[3] =  {  2,0,3,2,2,0,3,2,
 					2,0,3,2,2,0,3,2,
 					2,0,2,2,2,0,2,2,
 
-				    0,0,0,0,0,0,0,0,
+					0,0,0,0,0,0,0,0,
 					0,2,2,2,2,2,2,0,
 					0,2,3,3,3,3,2,0,
 					0,2,3,2,2,0,2,0,
@@ -56,7 +56,7 @@ Tile Tiles[3] =  {  2,0,3,2,2,0,3,2,
 					0,2,2,2,2,2,2,0,
 					0,0,0,0,0,0,0,0,
 
-				    0,0,0,2,2,2,3,1,
+					0,0,0,2,2,2,3,1,
 					0,0,0,2,2,2,3,1,
 					0,0,0,2,2,2,3,1,
 					0,0,0,2,2,2,3,1,
@@ -82,10 +82,10 @@ RGBQUAD Palette[4];
 
 byte* RAM;
 
-#define FLAG_ZERO		1 << 0 // 0000 0001 
-#define FLAG_ADD_SUB	1 << 1 // 0000 0010
-#define FLAG_HALF_CARRY 1 << 2 // 0000 0100
-#define FLAG_CARRY		1 << 3 // 0000 1000
+#define FLAG_Z		1 << 7
+#define FLAG_N		1 << 6
+#define FLAG_H		1 << 5
+#define FLAG_C		1 << 4
 
 static union {
 	struct {
@@ -156,12 +156,6 @@ void GBResizeDIB(int Width, int Height)
 
 	int BitmapMemorySize = (BitmapWidth * BitmapHeight) * sizeof(uint32_t);
 	BitmapMemory = VirtualAlloc(0, BitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
-
-	if (AllocConsole())
-	{
-		FILE* fi = 0;
-		freopen_s(&fi, "CONOUT$", "w", stdout);
-	}
 
 	if (BitmapMemory)
 	{
@@ -361,6 +355,39 @@ void WriteU8(uint16_t addr, uint8_t n)
 	ProgramCounter++;
 }
 
+int8_t ReadI8()
+{
+	ProgramCounter++;
+	int8_t n = RAM[ProgramCounter];
+	ProgramCounter++;
+	return n;
+}
+
+void UpdateZeroFlag(uint8_t a)
+{
+
+	if (a == 0)
+	{
+		SET(StatusFlags, FLAG_Z);
+	}
+	else
+	{
+		RESET(StatusFlags, FLAG_Z);
+	}
+}
+
+void UpdateHalfCarryFlag(int8_t a, int8_t b)
+{
+	if ((((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	{
+		SET(StatusFlags, FLAG_H);
+	}
+	else
+	{
+		RESET(StatusFlags, FLAG_H);
+	}
+}
+
 void update()
 {
 	uint32_t CycleCount = 0; 
@@ -380,7 +407,7 @@ void update()
 			CycleCount += 4;
 			break;
 		}
-		case 0xc3: // JP a16
+		case 0xC3: // JP a16
 		{
 			uint16_t nn = ReadU16();
 			ProgramCounter = nn;
@@ -391,6 +418,8 @@ void update()
 		{
 			A = A ^ A;
 			ProgramCounter++;
+			RESET(StatusFlags, FLAG_N|FLAG_H|FLAG_C);
+			UpdateZeroFlag(A);
 			CycleCount += 4;
 			break;
 		}
@@ -426,6 +455,35 @@ void update()
 		{
 			B--;
 			ProgramCounter++;
+			SET(StatusFlags, FLAG_N);
+			UpdateHalfCarryFlag(B, -1);
+			UpdateZeroFlag(B);
+			CycleCount += 4;
+			break;
+		}
+		case 0x20: // JR NZ, r8
+		{
+			if (TEST(StatusFlags, FLAG_Z)) // NZ
+			{
+				ProgramCounter++;
+				ProgramCounter++;
+				CycleCount += 8;
+			}
+			else
+			{
+				int8_t n = ReadI8();
+				ProgramCounter += n;
+				CycleCount += 12;
+			}
+			break;
+		}
+		case 0x0D: // DEC C
+		{
+			C--;
+			ProgramCounter++;
+			SET(StatusFlags, FLAG_N);
+			UpdateHalfCarryFlag(C, -1);
+			UpdateZeroFlag(C);
 			CycleCount += 4;
 			break;
 		}
@@ -528,20 +586,31 @@ INT WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 	QueryPerformanceFrequency(&PerfCountFrequencyResult);
 	uint32_t PerfCountFrequency = PerfCountFrequencyResult.QuadPart;
 
-	if (InitWindow(hInstance))
-	{
-		ShowWindow(windowHandle, nCmdShow);
-	}
-	else
+	if (!InitWindow(hInstance))
 	{
 		return 0;
 	}
 
+	ShowWindow(windowHandle, nCmdShow);
+
+#if 0
+	if (AllocConsole())
+	{
+		FILE* fi = 0;
+		freopen_s(&fi, "CONOUT$", "w", stdout);
+	}
+#endif // DEBUG CONSOLE
 
 	if (!LoadROM())
 	{
 		return 0;
 	}
+
+	char RomTitle[40];
+	memcpy(RomTitle, &RAM[0x134], sizeof(RomTitle));
+	char Title[40] = { "MinGB - " };
+	strcat_s(Title, 40, RomTitle);
+	SetWindowTextA(windowHandle, Title);
 
 	MSG msg = { };
 	// Enter the infinite message loop
@@ -575,7 +644,6 @@ INT WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			Sleep(MS_PER_FRAME - deltaTime);
 
 		}
-
 
 		CleanUp();
 	}
